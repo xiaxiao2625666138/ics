@@ -1,0 +1,405 @@
+/*
+ * proxy.c - ICS Web proxy
+ *
+ * ************************
+ * *  name：  周雪振       *
+ * *    id：  5141509091  *
+ * ************************
+ * 
+ *
+ */
+
+#include "csapp.h"
+#include <stdarg.h>
+
+
+/*
+ * Function prototypes
+ */
+int parse_uri(char *uri, char *target_addr, char *path, char *port);
+void format_log_entry(char *logstring, struct sockaddr_in *sockaddr, char *uri, size_t size);
+void doit(int fd, struct sockaddr_storage *clientaddr);      /* doit：处理请求 */
+int write_headers(int clientfd, char *request, rio_t *rio);  /* write_headers：转发http headers */
+int Rio_writen_w(int fd, void *usrbuf, size_t n);            /* Rio_writen_w：包装rio_writen */
+ssize_t Rio_readnb_w(rio_t *rp, void *usrbuf, size_t n);     /* Rio_readnb_w：包装rio_readnb */
+ssize_t Rio_readlineb_w(rio_t *rp, void *usrbuf, size_t maxlen); /* Rio_readlineb_w：包装rio_readlineb */
+void *thread(void *vargp);                                   /* thread：线程方法 */
+
+/***************************************************************************/
+/* thread 相关的结构与方法 */
+/* 采用生产者消费者模式 */
+
+/* $begin thread_socket_t：产品结构 */
+typedef struct{
+    int connfd;               /* connected fd */
+    struct sockaddr_storage * clientaddr;  /* client socket address */
+} thread_socket_t;
+
+/* $end thread_socket_t */
+
+/* $begin sbuft：产品缓存区结构 */
+typedef struct {
+    thread_socket_t * *buf;         /* Buffer array */         
+    int n;                          /* Maximum number of slots */
+    int front;                      /* buf[(front+1)%n] is first item */
+    int rear;                       /* buf[rear%n] is last item */
+    sem_t mutex;                    /* Protects accesses to buf */
+    sem_t slots;                    /* Counts available slots */
+    sem_t items;                    /* Counts available items */
+} sbuf_t;
+/* $end sbuft */
+
+void sbuf_init(sbuf_t *sp, int n);                     /* sbuf_init：初始化产品缓存区 */
+void sbuf_deinit(sbuf_t *sp);                          /* sbuf_dinit：释放产品缓存区 */
+void sbuf_insert(sbuf_t *sp, thread_socket_t * item);  /* sbuf_insert：插入产品 */
+thread_socket_t * sbuf_remove(sbuf_t *sp);             /* sbuf_remove：使用产品 */
+
+/* Create an empty, bounded, shared FIFO buffer with n slots */
+/* $begin sbuf_init */
+void sbuf_init(sbuf_t *sp, int n)
+{
+    sp->buf = Calloc(n, sizeof(thread_socket_t *)); 
+    sp->n = n;                       /* Buffer holds max of n items */
+    sp->front = sp->rear = 0;        /* Empty buffer iff front == rear */
+    Sem_init(&sp->mutex, 0, 1);      /* Binary semaphore for locking */
+    Sem_init(&sp->slots, 0, n);      /* Initially, buf has n empty slots */
+    Sem_init(&sp->items, 0, 0);      /* Initially, buf has zero data items */
+}
+/* $end sbuf_init */
+
+/* Clean up buffer sp */
+/* $begin sbuf_deinit */
+void sbuf_deinit(sbuf_t *sp)
+{
+    Free(sp->buf);
+}
+/* $end sbuf_deinit */
+
+/* Insert item onto the rear of shared buffer sp */
+/* $begin sbuf_insert */
+void sbuf_insert(sbuf_t *sp, thread_socket_t * item)
+{
+    P(&sp->slots);                          /* Wait for available slot */
+    P(&sp->mutex);                          /* Lock the buffer */
+    sp->buf[(++sp->rear)%(sp->n)]=item;     /* Insert the item */
+    V(&sp->mutex);                          /* Unlock the buffer */
+    V(&sp->items);                          /* Announce available item */
+}
+/* $end sbuf_insert */
+
+/* Remove and return the first item from buffer sp */
+/* $begin sbuf_remove */
+thread_socket_t * sbuf_remove(sbuf_t *sp)
+{
+    thread_socket_t * item;
+    P(&sp->items);                          /* Wait for available item */
+    P(&sp->mutex);                          /* Lock the buffer */
+    item = sp->buf[(++sp->front)%(sp->n)];  /* Remove the item */
+    V(&sp->mutex);                          /* Unlock the buffer */
+    V(&sp->slots);                          /* Announce available slot */
+    return item;
+}
+/* $end sbuf_remove */
+/* $end sbufc */
+/****************************************************************************/
+
+
+/*
+ * main - Main routine for the proxy program
+ */
+
+#define NTHREADS  20   /* 线程池中预线程的数量 */
+#define SUBFSIZE 40;   /* 产品缓冲区的产品最大容量 */
+
+sbuf_t sbuf;    /* 产品缓冲区 */       
+sem_t mutex;    /* printf的互斥锁 */
+
+int main(int argc, char **argv)
+{
+    int listenfd, connfd;
+    socklen_t clientlen=sizeof(struct sockaddr_in);
+    thread_socket_t *threadsock;        /* 待消费的线程产品 */
+    pthread_t tid;
+    
+    if(argc !=2 ){                      /* 命令行参数，需要一个端口参数 */
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+    
+    sbuf_init(&sbuf, 20);               /* 初始化产品缓存区 */
+    Sem_init(&mutex, 0, 1);             /* 初始化printf的互斥锁 */
+    listenfd=Open_listenfd(argv[1]);    /* 打开监听socket */
+    signal(SIGPIPE, SIG_IGN);           /* 忽视进程的SIGPIPE信号，防止发生连接中断时整个进程终止 */
+    
+    for(int i=0;i<NTHREADS;i++){        /* 初始化线程池，其实就是预先创建NTHREADS个线程 */
+        Pthread_create(&tid, NULL, thread, NULL);
+    }
+      
+    while(1){                            /* 处理连接请求 */
+        /* 为待消费产品分配独立的空间 */
+        threadsock=Malloc(sizeof(thread_socket_t));
+        threadsock->clientaddr=Malloc(sizeof(struct sockaddr_storage));
+        /* 接受连接请求 */
+        connfd=Accept(listenfd, (SA *) (threadsock->clientaddr), &clientlen);
+        threadsock->connfd=connfd;
+        /* 插入产品 */
+        sbuf_insert(&sbuf, threadsock);
+    }
+    
+    sbuf_deinit(&sbuf);
+    Pthread_exit(NULL);
+    return 1;
+}
+
+/* 线程方法 */
+void *thread(void *vargp){
+    Pthread_detach(pthread_self());                       /* 分离线程 */
+    while(1){                                             /* 循环消费产品 */
+        thread_socket_t * threadsock=sbuf_remove(&sbuf);  /* 消费产品 */
+        doit(threadsock->connfd, threadsock->clientaddr); /* 处理请求 */
+        Close(threadsock->connfd);                        /* 关闭连接 */
+        Free(threadsock->clientaddr);                     /* 释放client的socketaddr的地址空间 */
+        Free(threadsock);                                 /* 释放产品的地址空间 */
+    }
+}
+
+/* 处理http请求 */
+void doit(int fd, struct sockaddr_storage * clientaddr){
+    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    char hostname[MAXLINE], pathname[MAXLINE], port[8];
+    rio_t rio;                 /* 与client端连接的socket的缓冲区 */
+    Rio_readinitb(&rio, fd);   /* 初始化读缓冲区 */
+    
+    if(Rio_readlineb_w(&rio, buf, MAXLINE)!=0){/* 读取请求头的第一行 */
+        if(!strstr(buf, "\r\n"))/* 判断请求的完整性，如果不完整说明连接故障，直接退出 */
+            return;
+        sscanf(buf, "%s %s %s", method, uri, version);  /* 获取method，URL，version */
+        parse_uri(uri, hostname, pathname, port);       /* 解析server端的hostname，pathname，port */
+        rio_t cli_rio;    /* 与server端连接socket的读缓冲区 */
+        int clientfd;     /* 与server端连接的socket文件描述符 */
+        clientfd=open_clientfd(hostname, port);
+        
+        if(clientfd<0)/* 如果连接失败，直接退出 */
+            return;
+        
+        Rio_readinitb(&cli_rio, clientfd);  /* 初始化从server读的缓冲区 */
+        char request[MAXLINE];
+        sprintf(request, "%s /%s %s\r\n", method, pathname, version); /* 构造给server的请求头的第一行 */
+        
+        /* 读取http request headers */
+        int req_length=write_headers(clientfd, request, &rio); /* http request body 的长度*/
+        int content_length=0;    /* http reponse body 的长度 */
+        int rn=0, readn, length=0;
+      
+        if(req_length<0){/* 如果读取http request headers 时出现连接故障，直接返回 */
+            Close(clientfd);
+            return;
+        }
+        
+        /* 转发http request body的内容 */
+        if(req_length>0){
+            readn=req_length;
+            while((rn=Rio_readnb_w(&rio, buf, readn))!=0){ /* 循环读取body全部的内容 */
+                if(Rio_writen_w(clientfd, buf, rn)!=rn){ /* 转发body内容，如果转发过程与server的连接出现故障，退出 */
+                    Close(clientfd);
+                    return;
+                }
+                if(rn==readn) /* 读取完成 */
+                    break;
+                readn=readn-rn;
+            }
+            if(rn!=readn){/* 如果转发过程与client的连接出现故障，直接退出 */
+                Close(clientfd);
+                return;
+            }
+        }
+        
+        /* 转发http reponse headers */
+        while((rn=Rio_readlineb_w(&cli_rio, buf, MAXLINE))>2){
+            if(strncasecmp(buf, "Content-length", 14)==0){/* 获取response body的长度 */
+                content_length=atoi(strchr(buf, ':')+1);
+            }
+            length=length+rn;
+            if(Rio_writen_w(fd, buf, rn)!=rn){/* 转发headers，如果过程中与client连接出现故障，直接退出 */
+                Close(clientfd);
+                return;
+            }
+        }
+        if(rn==0){ /* 如果转发过程中，与server连接出现故障，直接退出 */
+            Close(clientfd);
+            return;
+        }    
+        if(Rio_writen_w(fd, "\r\n", 2)!=2){/* 转发http reponse headers结束标志 */
+            Close(clientfd);
+            return;
+        }
+        
+        /* 转发http reponse body */
+        if(content_length>0){
+            int readedn=0;
+            while((rn=Rio_readnb_w(&cli_rio, buf, 1))!=0){/* 循环转发内容，每次转发一个字节，但使用了缓冲区 */
+                if(Rio_writen_w(fd, buf, rn)!=rn){
+                    Close(clientfd);return;
+                }
+                readedn+=rn;
+                if(readedn==content_length)/* 转发完成 */
+                    break;
+            }
+            if(readedn!=content_length){ /* 转发过程中与server连接出现故障，退出 */
+                Close(clientfd);return;
+            }
+        }
+        
+        char logstring[MAXLINE];
+        format_log_entry(logstring, (struct sockaddr_in *)clientaddr, uri, length+content_length+2);
+        P(&mutex);                  /* 对printf上锁 */
+        printf("%s\n", logstring);  /* 打印log信息 */
+        V(&mutex);                  /* 解锁 */
+        Close(clientfd);            /* 关闭与server的连接 */
+    }
+}
+
+/* 转发http request headers，返回body的长度 */
+int write_headers(int clientfd, char *request, rio_t *riop){
+    char buf[MAXLINE];
+    int length=0;     
+    Rio_readlineb_w(riop, buf, MAXLINE);
+    if(strlen(buf)==0)
+        return -1;
+    /* 转发请求行 */
+    if(Rio_writen_w(clientfd, request, strlen(request))!=strlen(request))
+        return -1;
+    while(strcmp(buf, "\r\n")){/* 循环转发headers */
+        if(strncasecmp(buf, "Content-length", 14)==0){/* http body的长度 */
+            length=atoi(strchr(buf, ':')+1);
+        }
+        if(Rio_writen_w(clientfd, buf, strlen(buf))!=strlen(buf)) 
+            return -1;
+        if(Rio_readlineb_w(riop, buf, MAXLINE)==0)
+            return -1;
+    }
+    if(Rio_writen_w(clientfd, "\r\n", 2)!=2) 
+        return -1;
+    return length;
+}
+
+/*
+ * parse_uri - URI parser
+ *
+ * Given a URI from an HTTP proxy GET request (i.e., a URL), extract
+ * the host name, path name, and port.  The memory for hostname and
+ * pathname must already be allocated and should be at least MAXLINE
+ * bytes. Return -1 if there are any problems.
+ */
+int parse_uri(char *uri, char *hostname, char *pathname, char *port)
+{
+    char *hostbegin;
+    char *hostend;
+    char *pathbegin;
+    int len;
+
+    if (strncasecmp(uri, "http://", 7) != 0) {
+        hostname[0] = '\0';
+        return -1;
+    }
+
+    /* Extract the host name */
+    hostbegin = uri + 7;
+    hostend = strpbrk(hostbegin, " :/\r\n\0");
+    if (hostend == NULL)
+        return -1;
+    len = hostend - hostbegin;
+    strncpy(hostname, hostbegin, len);
+    hostname[len] = '\0';
+
+    /* Extract the port number */
+    if (*hostend == ':') {
+        char *p = hostend + 1;
+        while (isdigit(*p))
+            *port++ = *p++;
+        *port = '\0';
+    } else {
+        strcpy(port, "80");
+    }
+
+    /* Extract the path */
+    pathbegin = strchr(hostbegin, '/');
+    if (pathbegin == NULL) {
+        pathname[0] = '\0';
+    }
+    else {
+        pathbegin++;
+        strcpy(pathname, pathbegin);
+    }
+
+    return 0;
+}
+
+/*
+ * format_log_entry - Create a formatted log entry in logstring.
+ *
+ * The inputs are the socket address of the requesting client
+ * (sockaddr), the URI from the request (uri), the number of bytes
+ * from the server (size).
+ */
+void format_log_entry(char *logstring, struct sockaddr_in *sockaddr,
+                      char *uri, size_t size)
+{
+    time_t now;
+    char time_str[MAXLINE];
+    unsigned long host;
+    unsigned char a, b, c, d;
+
+    /* Get a formatted time string */
+    now = time(NULL);
+    strftime(time_str, MAXLINE, "%a %d %b %Y %H:%M:%S %Z", localtime(&now));
+
+    /*
+     * Convert the IP address in network byte order to dotted decimal
+     * form. Note that we could have used inet_ntoa, but chose not to
+     * because inet_ntoa is a Class 3 thread unsafe function that
+     * returns a pointer to a static variable (Ch 12, CS:APP).
+     */
+    host = ntohl(sockaddr->sin_addr.s_addr);
+    a = host >> 24;
+    b = (host >> 16) & 0xff;
+    c = (host >> 8) & 0xff;
+    d = host & 0xff;
+
+    /* Return the formatted log entry string */
+    sprintf(logstring, "%s: %d.%d.%d.%d %s %zu", time_str, a, b, c, d, uri, size);
+}
+
+int Rio_writen_w(int fd, void *usrbuf, size_t n) 
+{
+    if (rio_writen(fd, usrbuf, n) != n){
+        printf("Rio_writen error: %s\n", strerror(errno));
+        return 0;
+    }
+    return n;
+}
+
+ssize_t Rio_readnb_w(rio_t *rp, void *usrbuf, size_t n) 
+{
+    ssize_t rc;
+    if ((rc = rio_readnb(rp, usrbuf, n)) < 0){
+        printf("Rio_readnb error %s\n", strerror(errno));
+        return 0;
+    }
+    return rc;
+}
+
+ssize_t Rio_readlineb_w(rio_t *rp, void *usrbuf, size_t maxlen) 
+{
+    ssize_t rc;
+
+    if ((rc = rio_readlineb(rp, usrbuf, maxlen)) < 0){
+        printf("Rio_readlineb error: %s\n", strerror(errno));
+        return 0;
+    }
+    /* 这里只有在获取header时使用readlineb，所以用\r\n判断合法性 */
+    if(!strstr(usrbuf, "\r\n")) return 0;
+    return rc;
+} 
+
+

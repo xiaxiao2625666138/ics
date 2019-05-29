@@ -1,0 +1,119 @@
+/*
+ * BUG#0
+ * description: 
+     miss semicolon
+ * location: 
+ *   int a = 10  (line 18)
+ * evidence: 
+ *   test.c:19: error: two or more data types in declaration specifiers
+ */
+
+BUG#1
+description:
+  miss ';'
+location:
+  enum{buf_size=buf_nrec *100}  (line 52)
+evidence:
+  gen_sort.c:54:9: error: expected ';', identifier or '(' before 'struct'
+   typedef struct record {
+
+
+
+BUG#2
+description:
+  miss ';'
+location:
+  typedef sturct record {...} record_t (line 58)
+evidence:
+  gen_sort.c:60:1: error: expected '=', ',', ';', 'asm' or '__attribute__' before 'static'
+   static long cur_rec = 0;
+
+
+
+BUG#3
+description:
+  unknow type name 'record' (should be 'record_t')
+location:
+  static void gen_rec(record *rec){...} (line 114)
+evidence:
+  gen_sort.c:114:9: error:unknown type name 'record'
+   gen_rec(record *rec)
+
+
+BUG#4
+description:
+  should include 'stdio.h' ( #include<stdio.h>)
+location:
+  printf("usage: %s <#record><filename> \n", fn);  (line 157)
+  printf("error: #record less than 0 [%ld]\n", rec_max);  (line 172)
+  printf("gen_sort running ... with [%ld, %s]\n", rec_max, fn);  (line 177)
+  File *file = fopen(fn, "r");  (line 187)
+evidence:
+  gen_sort.c:157:2: warning: implicit declaration of function 'printf' [-Wimplicit-function-declaration]
+  printf("usage: %s <#record> <filename> \n", fn);
+...
+  gen_sort.c 187:2: error:unknown type name 'FILE'
+    FILE *file=fopen(fn, "r");
+
+
+BUG#5
+description:
+  miss '{'
+location:
+  if (!file)  (line 187)
+evidence:
+  gen_sort.c:194:2: error: expected identifier or '(' before 'while'
+    while (cur_rec < rec_max){
+
+
+BUG#6
+description:
+  confiliction types argument
+location:
+  free(buf);  (line 210)
+evidence:
+  gen_sort.c:210:2: error: conficting types for 'free'
+  In file chluded from gen_sort.c:41:0:
+  /usr/include/stdlib.h:444:13: note: previous declaration of 'free' was here
+    extern void free (void *ptr) __THROW;
+
+
+
+
+BUG#7
+description:
+  ubable to open file
+location:
+  File *file = fopen(fn,"w");  (line 185)
+evidence:
+  error:unable to open file sort300mb.dat
+
+
+
+BUG#8
+description:
+  segmentation fault
+location:
+  int ret=(int)fwrite(buf, 1, cnt*rec_len, file);  (line 194);
+evidence:
+  Segmentation fault
+
+
+
+BUG#9
+description:
+  Segmentation fault 
+location
+  for(cnt =0; (cnt <= buf_nec) &&...  (line 147)
+evidence:
+  Segmentation fault
+
+
+
+BUG#10
+description:
+  wrong expression
+location:
+  enum { rec_len =key_len + recno_len+pad_len };  (line 48)
+evidence:
+  The data in output file is incomplete!

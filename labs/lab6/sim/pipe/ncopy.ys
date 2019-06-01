@@ -1,0 +1,170 @@
+
+
+#/* $begin ncopy-ys */
+##################################################################
+# ncopy.ys - Copy a src block of len words to dst.
+# Return the number of positive words (>0) contained in src.
+#
+# 周雪振 5141509091
+#
+# Describe how and why you modified the baseline code.
+#
+##################################################################
+# Do not modify this portion
+# Function prologue.
+# %rdi = src, %rsi = dst, %rdx = len
+ncopy:
+
+##################################################################
+# You can modify this portion
+        xorq %rax, %rax
+        iaddq $-12, %rdx        # 元素个数n-12
+        jge Loop1               # src元素个数n超过12个，循环
+L0:
+        iaddq $9, %rdx          # 剩余元素个数n - 3
+        jge  Loop2              # 剩余个数不少于三个，循环展开3次
+        jmp TestOdd             # 检查剩余个数
+
+# 循环展开3次
+Loop2:
+        mrmovq (%rdi), %r8      # src[0]
+        mrmovq 8(%rdi), %r9     # src[1]
+        mrmovq 16(%rdi), %r10   # src[2]
+        rmmovq %r8, (%rsi)      # move src[0] to &dst[0]
+        rmmovq %r9, 8(%rsi)     # move src[1] to &dst[1]
+        rmmovq %r10, 16(%rsi)   # move src[2] to &dst[2]
+        iaddq $24, %rdi         # src += 3
+        iaddq $24, %rsi         # dst += 3
+        andq %r8, %r8           # src[0]> 0?
+        jle LL3                 # src[0]<=0: jmp to test next element
+        iaddq $1, %rax          # src[0]==0: count++
+LL3:
+        andq %r9, %r9           # src[1]> 0?
+        jle LL4                 # src[1]<=0: jmp to test next element
+        iaddq $1, %rax          # src[1]==0: count++
+LL4:
+        andq %r10, %r10         # src[2]> 0?
+        jle LL5                 # src[2]<=0: jmp LL5
+        iaddq $1, %rax          # src[2]==0: count++
+LL5:
+        iaddq $-3, %rdx         # len-3
+        jge Loop2               # jmp to loop1
+
+# 剩余元素个数n：是3级循环展开后剩余的元素个数
+TestOdd:                        # 检查剩余元素个数
+        iaddq $2, %rdx          # 剩余元素个数n-1
+        je Odd                  # n==1: jmp to Odd
+        jg Even                 # n==2: jmp to Even
+        ret                     # n=0: return
+# 剩余元素个数为2个
+Even:
+        mrmovq (%rdi), %r8      # src[0]
+        mrmovq 8(%rdi), %r9     # src[1]
+        rmmovq %r8, (%rsi)      # move src[0] to &dst[0]
+        rmmovq %r9, 8(%rsi)     # move src[1] to &dst[1]
+        addq %r8, %r8           # src[0]>0?
+        jle LL6:                # src[0]<=0: jmp to test next element
+        iaddq $1, %rax          # src[0]>0: count++
+LL6:
+        addq %r9, %r9           # src[1]>0?  
+        jle Return              # src[1]<=0: end copy,  to return
+        iaddq $1, %rax          # src[1]>0: count++, end copy
+        ret                   
+Odd:   
+        mrmovq (%rdi), %r8      # src[0]
+        rmmovq %r8, (%rsi)      # move src[0] to det[0]
+        andq %r8, %r8           # src[0]> 0?
+        jle Return              # src[0]<=0 end copy, to return
+        iaddq $1, %rax          # src[0]==0 count++, end copy
+Return:
+        ret
+
+# 循环copy， 循环内展开12次
+Loop1:   
+        mrmovq (%rdi), %r8      # src[0]
+        mrmovq 8(%rdi), %r9     # src[1]
+        mrmovq 16(%rdi), %rcx   # src[2]
+        mrmovq 24(%rdi), %r10   # src[3]
+        mrmovq 32(%rdi), %r11   # src[4]
+        mrmovq 40(%rdi), %r12   # src[5]
+        mrmovq 48(%rdi), %r13   # src[6]
+        mrmovq 56(%rdi), %r14   # src[7]
+        rmmovq %r8, (%rsi)      # move src[0] to &dst[0]
+        rmmovq %r9, 8(%rsi)     # move src[1] to &dst[1]
+        rmmovq %rcx, 16(%rsi)   # move src[2] to &dst[2]
+        rmmovq %r10, 24(%rsi)   # move src[3] to &dst[3]
+        rmmovq %r11, 32(%rsi)   # move src[4] to &dst[4]
+        rmmovq %r12, 40(%rsi)   # move src[5] to &dst[5]
+        rmmovq %r13, 48(%rsi)   # move src[6] to &dst[6]
+        rmmovq %r14, 56(%rsi)   # move src[7] to &dst[7]
+        andq %r8, %r8
+        jle L2
+        iaddq $1, %rax
+L2:
+        andq %r9, %r9
+        jle L3
+        iaddq $1, %rax
+L3:
+        andq %rcx, %rcx
+        jle L4
+        iaddq $1, %rax
+L4:
+        andq %r10, %r10
+        jle L5
+        iaddq $1, %rax
+L5:
+        andq %r11, %r11
+        jle L6
+        iaddq $1, %rax
+L6:
+        andq %r12, %r12
+        jle L7
+        iaddq $1, %rax
+L7:
+        andq %r13, %r13
+        jle L8
+        iaddq $1, %rax
+L8:
+        andq %r14, %r14
+        jle L9
+        iaddq $1, %rax
+L9:
+        mrmovq 64(%rdi), %r8      # src[8]
+        mrmovq 72(%rdi), %r9      # src[9]
+        mrmovq 80(%rdi), %r10     # src[10]
+        mrmovq 88(%rdi), %r11     # src[11]
+        rmmovq %r8, 64(%rsi)      # move src[8] to &dst[8]
+        rmmovq %r9, 72(%rsi)      # move src[9] to &dst[9]
+        rmmovq %r10, 80(%rsi)     # move src[10] to &dst[10]
+        rmmovq %r11, 88(%rsi)     # move src[11] to &dst[11]
+        andq %r8, %r8
+        jle L10
+        iaddq $1, %rax
+L10:
+        andq %r9, %r9
+        jle L11
+        iaddq $1, %rax
+L11:
+        andq %r10, %r10
+        jle L12
+        iaddq $1, %rax
+L12:
+        andq %r11, %r11
+        jle L13
+        iaddq $1, %rax
+L13:
+        iaddq $96, %rdi         # src += 12
+        iaddq $96, %rsi         # dst += 12
+        iaddq $-12, %rdx        # len-12
+        jge Loop1               # jmp to loop1
+        jmp L0                  # loop end
+
+##################################################################
+# Do not modify the following section of code
+# Function epilogue.
+Done:
+	ret
+##################################################################
+# Keep the following label at the end of your function
+End:
+#/* $end ncopy-ys */
